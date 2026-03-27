@@ -10,10 +10,20 @@ A simple Python Tkinter-based GUI text editor with useful features like syntax h
 - Dark / Light mode
 - Find text
 - Auto backup system
+- Executable version (.exe) – Run the editor without installing Python.
 
 ## 🛠️ Built With
-- Python
-- Tkinter
+-Language: Python
+-GUI Framework: Tkinter
+-Build Tool: PyInstaller (for .exe)
+-Version Control: Git & GitHub
+
+📂 Project Structure:
+py_texteditor.py → Main Python script with all GUI logic.
+.gitignore → Avoids unnecessary files being pushed to GitHub.
+.gitattributes → GitHub language stats configuration.
+py_texteditor.spec → Used for building the .exe with PyInstaller.
+dist/ & build/ → Generated during .exe creation.
 
 ## ▶️ How to Run
 1. Install Python
