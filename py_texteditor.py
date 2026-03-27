@@ -1,0 +1,373 @@
+import tkinter as tk
+from tkinter import filedialog, messagebox, simpledialog, colorchooser, ttk
+import os
+import time
+import threading
+import re
+
+# -------- Line Number Canvas --------
+class LineNumberCanvas(tk.Canvas):
+    def __init__(self, parent, text_widget, show=True):
+        super().__init__(parent, width=40, bg="#2b2b2b")
+        self.text_widget = text_widget
+        self.show = show
+
+    def toggle(self):
+        self.show = not self.show
+        self.redraw()
+
+    def redraw(self):
+        self.delete("all")
+        if not self.show:
+            return
+        i = self.text_widget.index("@0,0")
+        while True:
+            dline = self.text_widget.dlineinfo(i)
+            if dline is None:
+                break
+            y = dline[1]
+            line_number = str(i).split(".")[0]
+            self.create_text(5, y, anchor="nw", text=line_number, fill="white")
+            i = self.text_widget.index(f"{i}+1line")
+
+# -------- Syntax Highlighting --------
+PY_KEYWORDS = [
+    "def", "class", "if", "else", "elif", "for", "while", "import", "from",
+    "return", "with", "as", "try", "except", "finally", "break", "continue",
+    "pass", "lambda", "yield", "global", "nonlocal", "assert", "del", "in", "is", "not", "and", "or"
+]
+
+def highlight_syntax(text_widget, enabled=True):
+    if not enabled:
+        for tag in text_widget.tag_names():
+            text_widget.tag_remove(tag, "1.0", tk.END)
+        return
+
+    content = text_widget.get("1.0", tk.END)
+
+    # Clear all tags first
+    for tag in text_widget.tag_names():
+        text_widget.tag_remove(tag, "1.0", tk.END)
+
+    # Keywords
+    for kw in PY_KEYWORDS:
+        for match in re.finditer(rf'\b{kw}\b', content):
+            start = f"1.0+{match.start()}c"
+            end = f"1.0+{match.end()}c"
+            text_widget.tag_add("keyword", start, end)
+    text_widget.tag_config("keyword", foreground="#ff6a00")
+
+    # Strings
+    for match in re.finditer(r'(\".*?\"|\'.*?\')', content):
+        start = f"1.0+{match.start()}c"
+        end = f"1.0+{match.end()}c"
+        text_widget.tag_add("string", start, end)
+    text_widget.tag_config("string", foreground="#00ff00")
+
+    # Comments
+    for match in re.finditer(r'#.*', content):
+        start = f"1.0+{match.start()}c"
+        end = f"1.0+{match.end()}c"
+        text_widget.tag_add("comment", start, end)
+    text_widget.tag_config("comment", foreground="#888888")
+
+    # Numbers
+    for match in re.finditer(r'\b\d+(\.\d+)?\b', content):
+        start = f"1.0+{match.start()}c"
+        end = f"1.0+{match.end()}c"
+        text_widget.tag_add("number", start, end)
+    text_widget.tag_config("number", foreground="#00c0ff")
+
+# -------- Main Editor --------
+class AdvancedTextEditor:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("PyEditor Advanced v5.0")
+        self.root.geometry("1000x700")
+        self.tabs = ttk.Notebook(root)
+        self.tabs.pack(fill=tk.BOTH, expand=True)
+        self.file_paths = {}
+        self.backup_folder = "pyeditor_backups"
+        os.makedirs(self.backup_folder, exist_ok=True)
+
+        # Options
+        self.line_numbers_visible = tk.BooleanVar(value=True)
+        self.syntax_highlight_enabled = tk.BooleanVar(value=True)
+        self.current_font = ("Consolas", 13)
+        self.current_font_family = "Consolas"
+        self.current_fg = "black"
+        self.current_bg = "white"
+
+        self.setup_ui()
+        self.create_menu()
+        self.bind_shortcuts()
+
+        # Start auto-save thread
+        threading.Thread(target=self.auto_save_loop, daemon=True).start()
+
+    # -------- UI Setup --------
+    def setup_ui(self):
+        self.add_new_tab()
+
+    def add_new_tab(self, file_path=None, content=""):
+        frame = tk.Frame(self.tabs)
+        self.tabs.add(frame, text="New File" if not file_path else os.path.basename(file_path))
+
+        # Line numbers
+        line_numbers = LineNumberCanvas(frame, None, show=self.line_numbers_visible.get())
+        line_numbers.pack(side=tk.LEFT, fill=tk.Y)
+
+        # Text area
+        text_area = tk.Text(
+            frame,
+            undo=True,
+            wrap=tk.WORD,
+            font=self.current_font,
+            bg=self.current_bg,
+            fg=self.current_fg,
+            insertbackground=self.current_fg,
+            padx=10,
+            pady=10
+        )
+        text_area.insert("1.0", content)
+        text_area.pack(side=tk.RIGHT, expand=True, fill=tk.BOTH)
+        line_numbers.text_widget = text_area
+
+        # Scrollbar
+        scrollbar = tk.Scrollbar(frame, command=lambda *args: [text_area.yview(*args), line_numbers.yview(*args)])
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        text_area.config(yscrollcommand=scrollbar.set)
+        line_numbers.config(yscrollcommand=text_area.yview)
+
+        # Bindings
+        text_area.bind("<KeyRelease>", lambda e, t=text_area, l=line_numbers: self.update_all(t, l))
+        text_area.bind("<Button-1>", lambda e, t=text_area, l=line_numbers: self.update_all(t, l))
+        text_area.bind("<MouseWheel>", lambda e, t=text_area, l=line_numbers: self.update_all(t, l))
+        text_area.bind("<Tab>", self.insert_tab)
+        text_area.bind("<Return>", self.auto_indent)
+        text_area.bind("<KeyRelease>", lambda e: self.highlight_current_line(text_area))
+        text_area.bind("<Button-1>", lambda e: self.highlight_current_line(text_area))
+
+        self.file_paths[text_area] = file_path
+        self.update_all(text_area, line_numbers)
+
+    # -------- Menu --------
+    def create_menu(self):
+        menu_bar = tk.Menu(self.root)
+        self.root.config(menu=menu_bar)
+
+        # File
+        file_menu = tk.Menu(menu_bar, tearoff=0)
+        menu_bar.add_cascade(label="File", menu=file_menu)
+        file_menu.add_command(label="New (Ctrl+N)", command=self.add_new_tab)
+        file_menu.add_command(label="Open (Ctrl+O)", command=self.open_file)
+        file_menu.add_command(label="Save (Ctrl+S)", command=self.save_file)
+        file_menu.add_command(label="Save As (Ctrl+Shift+S)", command=self.save_file_as)
+        file_menu.add_separator()
+        file_menu.add_command(label="Close Tab (Ctrl+W)", command=self.close_current_tab)
+        file_menu.add_command(label="Exit", command=self.root.quit)
+
+        # Edit
+        edit_menu = tk.Menu(menu_bar, tearoff=0)
+        menu_bar.add_cascade(label="Edit", menu=edit_menu)
+        edit_menu.add_command(label="Undo", command=self.undo)
+        edit_menu.add_command(label="Redo", command=self.redo)
+        edit_menu.add_separator()
+        edit_menu.add_command(label="Cut", command=self.cut)
+        edit_menu.add_command(label="Copy", command=self.copy)
+        edit_menu.add_command(label="Paste", command=self.paste)
+        edit_menu.add_separator()
+        edit_menu.add_command(label="Find", command=self.find_text)
+
+        # Appearance
+        view_menu = tk.Menu(menu_bar, tearoff=0)
+        menu_bar.add_cascade(label="Appearance", menu=view_menu)
+        view_menu.add_command(label="Dark Mode", command=self.dark_mode)
+        view_menu.add_command(label="Light Mode", command=self.light_mode)
+        view_menu.add_separator()
+        view_menu.add_checkbutton(label="Show Line Numbers", variable=self.line_numbers_visible, command=self.toggle_line_numbers)
+        view_menu.add_checkbutton(label="Enable Syntax Highlighting", variable=self.syntax_highlight_enabled, command=self.toggle_syntax_highlight)
+        view_menu.add_command(label="Change Font Size", command=self.change_font_size)
+        view_menu.add_command(label="Change Font Family", command=self.change_font_family)
+        view_menu.add_command(label="Change Text Color", command=self.change_text_color)
+        view_menu.add_command(label="Change Background Color", command=self.change_bg_color)
+
+    # -------- Shortcuts --------
+    def bind_shortcuts(self):
+        self.root.bind("<Control-n>", lambda e: self.add_new_tab())
+        self.root.bind("<Control-o>", lambda e: self.open_file())
+        self.root.bind("<Control-s>", lambda e: self.save_file())
+        self.root.bind("<Control-S>", lambda e: self.save_file_as())
+        self.root.bind("<Control-f>", lambda e: self.find_text())
+        self.root.bind("<Control-w>", lambda e: self.close_current_tab())
+
+    # -------- File Handling --------
+    def current_text_widget(self):
+        return self.tabs.nametowidget(self.tabs.select()).winfo_children()[1]
+
+    def current_line_numbers(self):
+        return self.tabs.nametowidget(self.tabs.select()).winfo_children()[0]
+
+    def open_file(self):
+        file_path = filedialog.askopenfilename(filetypes=[("Python Files", "*.py"), ("Text Files", "*.txt"), ("All Files", "*.*")])
+        if file_path:
+            with open(file_path, "r") as f:
+                content = f.read()
+            self.add_new_tab(file_path=file_path, content=content)
+
+    def save_file(self):
+        text_widget = self.current_text_widget()
+        file_path = self.file_paths.get(text_widget)
+        if not file_path:
+            return self.save_file_as()
+        with open(file_path, "w") as f:
+            f.write(text_widget.get("1.0", tk.END))
+        messagebox.showinfo("Saved", f"File saved: {file_path}")
+        self.backup_file(text_widget)
+
+    def save_file_as(self):
+        text_widget = self.current_text_widget()
+        file_path = filedialog.asksaveasfilename(defaultextension=".txt")
+        if file_path:
+            with open(file_path, "w") as f:
+                f.write(text_widget.get("1.0", tk.END))
+            self.file_paths[text_widget] = file_path
+            self.tabs.tab(self.tabs.select(), text=os.path.basename(file_path))
+            messagebox.showinfo("Saved", f"File saved: {file_path}")
+            self.backup_file(text_widget)
+
+    # -------- Backup --------
+    def backup_file(self, text_widget):
+        file_path = self.file_paths.get(text_widget)
+        if not file_path:
+            return
+        filename = os.path.basename(file_path)
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        backup_path = os.path.join(self.backup_folder, f"{filename}_{timestamp}.bak")
+        with open(backup_path, "w") as f:
+            f.write(text_widget.get("1.0", tk.END))
+
+    def auto_save_loop(self):
+        while True:
+            time.sleep(300)  # every 5 min
+            for text_widget in self.file_paths:
+                if self.file_paths[text_widget]:
+                    self.backup_file(text_widget)
+
+    # -------- Edit --------
+    def undo(self): self.current_text_widget().edit_undo()
+    def redo(self): self.current_text_widget().edit_redo()
+    def cut(self): self.current_text_widget().event_generate("<<Cut>>")
+    def copy(self): self.current_text_widget().event_generate("<<Copy>>")
+    def paste(self): self.current_text_widget().event_generate("<<Paste>>")
+
+    # -------- Find --------
+    def find_text(self):
+        text_widget = self.current_text_widget()
+        text_widget.tag_remove("match", "1.0", tk.END)
+        search_query = simpledialog.askstring("Find", "Enter text:")
+        if search_query:
+            idx = "1.0"
+            count = 0
+            while True:
+                idx = text_widget.search(search_query, idx, nocase=True, stopindex=tk.END)
+                if not idx:
+                    break
+                lastidx = f"{idx}+{len(search_query)}c"
+                text_widget.tag_add("match", idx, lastidx)
+                idx = lastidx
+                count += 1
+            text_widget.tag_config("match", background="yellow", foreground="black")
+            messagebox.showinfo("Find Result", f"{count} matches found")
+
+    # -------- Appearance --------
+    def set_theme(self, bg, fg, insertcolor):
+        self.current_bg, self.current_fg = bg, fg
+        for tab_index in range(len(self.tabs.tabs())):
+            frame = self.tabs.nametowidget(self.tabs.tabs()[tab_index])
+            text_widget = frame.winfo_children()[1]
+            text_widget.config(bg=bg, fg=fg, insertbackground=insertcolor)
+        self.root.config(bg=bg)
+
+    def dark_mode(self): self.set_theme("#1e1e1e", "#ffffff", "white")
+    def light_mode(self): self.set_theme("white", "black", "black")
+
+    # -------- Font & Color --------
+    def change_font_size(self):
+        size = simpledialog.askinteger("Font Size", "Enter font size:", initialvalue=self.current_font[1])
+        if size:
+            self.current_font = (self.current_font_family, size)
+            for tab_index in range(len(self.tabs.tabs())):
+                frame = self.tabs.nametowidget(self.tabs.tabs()[tab_index])
+                frame.winfo_children()[1].config(font=self.current_font)
+
+    def change_font_family(self):
+        family = simpledialog.askstring("Font Family", "Enter font family:", initialvalue=self.current_font_family)
+        if family:
+            self.current_font_family = family
+            self.current_font = (family, self.current_font[1])
+            for tab_index in range(len(self.tabs.tabs())):
+                frame = self.tabs.nametowidget(self.tabs.tabs()[tab_index])
+                frame.winfo_children()[1].config(font=self.current_font)
+
+    def change_text_color(self):
+        color = colorchooser.askcolor(title="Choose Text Color")[1]
+        if color:
+            self.current_fg = color
+            for tab_index in range(len(self.tabs.tabs())):
+                frame = self.tabs.nametowidget(self.tabs.tabs()[tab_index])
+                frame.winfo_children()[1].config(fg=color, insertbackground=color)
+
+    def change_bg_color(self):
+        color = colorchooser.askcolor(title="Choose Background Color")[1]
+        if color:
+            self.current_bg = color
+            for tab_index in range(len(self.tabs.tabs())):
+                frame = self.tabs.nametowidget(self.tabs.tabs()[tab_index])
+                frame.winfo_children()[1].config(bg=color)
+
+    # -------- Toggles --------
+    def toggle_line_numbers(self):
+        for tab_index in range(len(self.tabs.tabs())):
+            frame = self.tabs.nametowidget(self.tabs.tabs()[tab_index])
+            line_numbers = frame.winfo_children()[0]
+            line_numbers.toggle()
+
+    def toggle_syntax_highlight(self):
+        text_widget = self.current_text_widget()
+        self.update_all(text_widget, self.current_line_numbers())
+
+    # -------- Misc --------
+    def update_all(self, text_widget, line_numbers):
+        highlight_syntax(text_widget, self.syntax_highlight_enabled.get())
+        self.highlight_current_line(text_widget)
+        line_numbers.redraw()
+
+    def insert_tab(self, event):
+        text_widget = self.current_text_widget()
+        text_widget.insert(tk.INSERT, " " * 4)
+        return "break"
+
+    def auto_indent(self, event):
+        text_widget = self.current_text_widget()
+        line = text_widget.get("insert linestart", "insert")
+        indent = re.match(r'\s*', line).group(0)
+        text_widget.insert(tk.INSERT, f"\n{indent}")
+        return "break"
+
+    def highlight_current_line(self, text_widget):
+        text_widget.tag_remove("current_line", "1.0", tk.END)
+        row = text_widget.index("insert").split(".")[0]
+        text_widget.tag_add("current_line", f"{row}.0", f"{row}.end")
+        text_widget.tag_config("current_line", background="#e3e3e3")
+
+    def close_current_tab(self):
+        tab = self.tabs.select()
+        if tab:
+            self.tabs.forget(tab)
+
+# -------- Run --------
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = AdvancedTextEditor(root)
+    root.mainloop()
