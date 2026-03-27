@@ -1,5 +1,12 @@
+# Mark documentation (so it won’t count as code)
+*.md linguist-documentation=true
+README.md linguist-documentation=true
+
+# Explicitly mark true code
 *.py linguist-language=Python
-*.txt linguist-language=Python
-*.md linguist-language=Python
-*.exe linguist-language=Python
-*.tex linguist-language=ignore
+
+# Ignore generated or binary files if needed
+*.exe linguist-generated=true
+*.spec linguist-generated=true
+dist/** linguist-generated=true
+build/** linguist-generated=true
